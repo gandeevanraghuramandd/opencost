@@ -1048,32 +1048,131 @@ func (cm *CostModel) GetNodeCost() (map[string]*costAnalyzerCloud.Node, error) {
 			newCnode.RAMCost = fmt.Sprintf("%f", defaultRAMPrice)
 			newCnode.RAMBytes = fmt.Sprintf("%f", ram)
 
-		} else if newCnode.GPU != "" && newCnode.GPUCost == "" {
-			// was the big thing to investigate. All the funky ratio math
-			// we were doing was messing with their default pricing. for SUSE Rancher.
+		} else {
+			if newCnode.GPU != "" && newCnode.GPUCost == "" {
+				// was the big thing to investigate. All the funky ratio math
+				// we were doing was messing with their default pricing. for SUSE Rancher.
 
-			// We reach this when a GPU is detected on a node, but no cost for
-			// the GPU is defined in the OnDemand pricing. Calculate ratios of
-			// CPU to RAM and GPU to RAM costs, then distribute the total node
-			// cost among the CPU, RAM, and GPU.
-			log.Tracef("GPU without cost found for %s, calculating...", cp.GetKey(nodeLabels, n).Features())
+				// We reach this when a GPU is detected on a node, but no cost for
+				// the GPU is defined in the OnDemand pricing. Calculate ratios of
+				// CPU to RAM and GPU to RAM costs, then distribute the total node
+				// cost among the CPU, RAM, and GPU.
+				log.Tracef("GPU without cost found for %s, calculating...", cp.GetKey(nodeLabels, n).Features())
 
-			// Some customers may want GPU pricing to be determined by the labels affixed to their nodes. GpuPricing
-			// passes the node's labels to the provider, which then cross-references them with the labels that the
-			// provider knows to have label-specific costs associated with them, and returns that cost. See CSVProvider
-			// for an example implementation.
-			gpuPricing, err := cp.GpuPricing(nodeLabels)
-			if err != nil {
-				log.Errorf("Could not determine custom GPU pricing: %s", err)
-			} else if len(gpuPricing) > 0 {
-				newCnode.GPUCost = gpuPricing
-				log.Infof("Using custom GPU pricing for node \"%s\": %s", name, gpuPricing)
+				// Some customers may want GPU pricing to be determined by the labels affixed to their nodes. GpuPricing
+				// passes the node's labels to the provider, which then cross-references them with the labels that the
+				// provider knows to have label-specific costs associated with them, and returns that cost. See CSVProvider
+				// for an example implementation.
+				gpuPricing, err := cp.GpuPricing(nodeLabels)
+				if err != nil {
+					log.Errorf("Could not determine custom GPU pricing: %s", err)
+				} else if len(gpuPricing) > 0 {
+					newCnode.GPUCost = gpuPricing
+					log.Infof("Using custom GPU pricing for node \"%s\": %s", name, gpuPricing)
+				}
+
+				if newCnode.GPUCost == "" {
+					defaultCPU, err := strconv.ParseFloat(cfg.CPU, 64)
+					if err != nil {
+						log.Errorf("Could not parse default cpu price")
+						defaultCPU = 0
+					}
+					if math.IsNaN(defaultCPU) {
+						log.Warnf("defaultCPU parsed as NaN. Setting to 0.")
+						defaultCPU = 0
+					}
+
+					defaultRAM, err := strconv.ParseFloat(cfg.RAM, 64)
+					if err != nil {
+						log.Errorf("Could not parse default ram price")
+						defaultRAM = 0
+					}
+					if math.IsNaN(defaultRAM) {
+						log.Warnf("defaultRAM parsed as NaN. Setting to 0.")
+						defaultRAM = 0
+					}
+
+					defaultGPU, err := strconv.ParseFloat(cfg.GPU, 64)
+					if err != nil {
+						log.Errorf("Could not parse default gpu price")
+						defaultGPU = 0
+					}
+					if math.IsNaN(defaultGPU) {
+						log.Warnf("defaultGPU parsed as NaN. Setting to 0.")
+						defaultGPU = 0
+					}
+
+					cpuToRAMRatio := defaultCPU / defaultRAM
+					if math.IsNaN(cpuToRAMRatio) {
+						log.Warnf("cpuToRAMRatio[defaultCPU: %f / defaultRAM: %f] is NaN. Setting to 10.", defaultCPU, defaultRAM)
+						cpuToRAMRatio = 10
+					}
+
+					gpuToRAMRatio := defaultGPU / defaultRAM
+					if math.IsNaN(gpuToRAMRatio) {
+						log.Warnf("gpuToRAMRatio is NaN. Setting to 100.")
+						gpuToRAMRatio = 100
+					}
+
+					ramGB := ram / 1024 / 1024 / 1024
+					if math.IsNaN(ramGB) {
+						log.Warnf("ramGB is NaN. Setting to 0.")
+						ramGB = 0
+					}
+
+					ramMultiple := gpuc*gpuToRAMRatio + cpu*cpuToRAMRatio + ramGB
+					if math.IsNaN(ramMultiple) {
+						log.Warnf("ramMultiple is NaN. Setting to 0.")
+						ramMultiple = 0
+					}
+
+					var nodePrice float64
+					if newCnode.Cost != "" {
+						nodePrice, err = strconv.ParseFloat(newCnode.Cost, 64)
+						if err != nil {
+							log.Errorf("Could not parse total node price")
+							return nil, err
+						}
+					} else if newCnode.VCPUCost != "" {
+						nodePrice, err = strconv.ParseFloat(newCnode.VCPUCost, 64) // all the price was allocated to the CPU
+						if err != nil {
+							log.Errorf("Could not parse node vcpu price")
+							return nil, err
+						}
+					} else { // add case to use default pricing model when API data fails.
+						log.Debugf("No node price or CPUprice found, falling back to default")
+						nodePrice = defaultCPU*cpu + defaultRAM*ram + gpuc*defaultGPU
+					}
+					if math.IsNaN(nodePrice) {
+						log.Warnf("nodePrice parsed as NaN. Setting to 0.")
+						nodePrice = 0
+					}
+
+					ramPrice := (nodePrice / ramMultiple)
+					if math.IsNaN(ramPrice) {
+						log.Warnf("ramPrice[nodePrice: %f / ramMultiple: %f] parsed as NaN. Setting to 0.", nodePrice, ramMultiple)
+						ramPrice = 0
+					}
+
+					cpuPrice := ramPrice * cpuToRAMRatio
+					gpuPrice := ramPrice * gpuToRAMRatio
+
+					newCnode.VCPUCost = fmt.Sprintf("%f", cpuPrice)
+					newCnode.RAMCost = fmt.Sprintf("%f", ramPrice)
+					newCnode.RAMBytes = fmt.Sprintf("%f", ram)
+					newCnode.GPUCost = fmt.Sprintf("%f", gpuPrice)
+				}
 			}
 
-			if newCnode.GPUCost == "" {
+			if newCnode.RAMCost == "" {
+				// We reach this when no RAM cost is defined in the OnDemand
+				// pricing. It calculates a cpuToRAMRatio and ramMultiple to
+				// distrubte the total node cost among CPU and RAM costs.
+				log.Tracef("No RAM cost found for %s, calculating...", cp.GetKey(nodeLabels, n).Features())
+
 				defaultCPU, err := strconv.ParseFloat(cfg.CPU, 64)
 				if err != nil {
-					log.Errorf("Could not parse default cpu price")
+					log.Warnf("Could not parse default cpu price")
 					defaultCPU = 0
 				}
 				if math.IsNaN(defaultCPU) {
@@ -1083,22 +1182,12 @@ func (cm *CostModel) GetNodeCost() (map[string]*costAnalyzerCloud.Node, error) {
 
 				defaultRAM, err := strconv.ParseFloat(cfg.RAM, 64)
 				if err != nil {
-					log.Errorf("Could not parse default ram price")
+					log.Warnf("Could not parse default ram price")
 					defaultRAM = 0
 				}
 				if math.IsNaN(defaultRAM) {
 					log.Warnf("defaultRAM parsed as NaN. Setting to 0.")
 					defaultRAM = 0
-				}
-
-				defaultGPU, err := strconv.ParseFloat(cfg.GPU, 64)
-				if err != nil {
-					log.Errorf("Could not parse default gpu price")
-					defaultGPU = 0
-				}
-				if math.IsNaN(defaultGPU) {
-					log.Warnf("defaultGPU parsed as NaN. Setting to 0.")
-					defaultGPU = 0
 				}
 
 				cpuToRAMRatio := defaultCPU / defaultRAM
@@ -1107,19 +1196,13 @@ func (cm *CostModel) GetNodeCost() (map[string]*costAnalyzerCloud.Node, error) {
 					cpuToRAMRatio = 10
 				}
 
-				gpuToRAMRatio := defaultGPU / defaultRAM
-				if math.IsNaN(gpuToRAMRatio) {
-					log.Warnf("gpuToRAMRatio is NaN. Setting to 100.")
-					gpuToRAMRatio = 100
-				}
-
 				ramGB := ram / 1024 / 1024 / 1024
 				if math.IsNaN(ramGB) {
 					log.Warnf("ramGB is NaN. Setting to 0.")
 					ramGB = 0
 				}
 
-				ramMultiple := gpuc*gpuToRAMRatio + cpu*cpuToRAMRatio + ramGB
+				ramMultiple := cpu*cpuToRAMRatio + ramGB
 				if math.IsNaN(ramMultiple) {
 					log.Warnf("ramMultiple is NaN. Setting to 0.")
 					ramMultiple = 0
@@ -1129,18 +1212,26 @@ func (cm *CostModel) GetNodeCost() (map[string]*costAnalyzerCloud.Node, error) {
 				if newCnode.Cost != "" {
 					nodePrice, err = strconv.ParseFloat(newCnode.Cost, 64)
 					if err != nil {
-						log.Errorf("Could not parse total node price")
+						log.Warnf("Could not parse total node price")
 						return nil, err
+					}
+					if newCnode.GPUCost != "" {
+						gpuPrice, err := strconv.ParseFloat(newCnode.GPUCost, 64)
+						if err != nil {
+							log.Warnf("Could not parse node gpu price")
+							return nil, err
+						}
+						nodePrice = nodePrice - gpuPrice // remove the gpuPrice from the total, we're just costing out RAM and CPU.
 					}
 				} else if newCnode.VCPUCost != "" {
 					nodePrice, err = strconv.ParseFloat(newCnode.VCPUCost, 64) // all the price was allocated to the CPU
 					if err != nil {
-						log.Errorf("Could not parse node vcpu price")
+						log.Warnf("Could not parse node vcpu price")
 						return nil, err
 					}
 				} else { // add case to use default pricing model when API data fails.
 					log.Debugf("No node price or CPUprice found, falling back to default")
-					nodePrice = defaultCPU*cpu + defaultRAM*ram + gpuc*defaultGPU
+					nodePrice = defaultCPU*cpu + defaultRAM*ramGB
 				}
 				if math.IsNaN(nodePrice) {
 					log.Warnf("nodePrice parsed as NaN. Setting to 0.")
@@ -1154,108 +1245,21 @@ func (cm *CostModel) GetNodeCost() (map[string]*costAnalyzerCloud.Node, error) {
 				}
 
 				cpuPrice := ramPrice * cpuToRAMRatio
-				gpuPrice := ramPrice * gpuToRAMRatio
 
-				newCnode.VCPUCost = fmt.Sprintf("%f", cpuPrice)
-				newCnode.RAMCost = fmt.Sprintf("%f", ramPrice)
-				newCnode.RAMBytes = fmt.Sprintf("%f", ram)
-				newCnode.GPUCost = fmt.Sprintf("%f", gpuPrice)
-			}
-		} else if newCnode.RAMCost == "" {
-			// We reach this when no RAM cost is defined in the OnDemand
-			// pricing. It calculates a cpuToRAMRatio and ramMultiple to
-			// distrubte the total node cost among CPU and RAM costs.
-			log.Tracef("No RAM cost found for %s, calculating...", cp.GetKey(nodeLabels, n).Features())
-
-			defaultCPU, err := strconv.ParseFloat(cfg.CPU, 64)
-			if err != nil {
-				log.Warnf("Could not parse default cpu price")
-				defaultCPU = 0
-			}
-			if math.IsNaN(defaultCPU) {
-				log.Warnf("defaultCPU parsed as NaN. Setting to 0.")
-				defaultCPU = 0
-			}
-
-			defaultRAM, err := strconv.ParseFloat(cfg.RAM, 64)
-			if err != nil {
-				log.Warnf("Could not parse default ram price")
-				defaultRAM = 0
-			}
-			if math.IsNaN(defaultRAM) {
-				log.Warnf("defaultRAM parsed as NaN. Setting to 0.")
-				defaultRAM = 0
-			}
-
-			cpuToRAMRatio := defaultCPU / defaultRAM
-			if math.IsNaN(cpuToRAMRatio) {
-				log.Warnf("cpuToRAMRatio[defaultCPU: %f / defaultRAM: %f] is NaN. Setting to 10.", defaultCPU, defaultRAM)
-				cpuToRAMRatio = 10
-			}
-
-			ramGB := ram / 1024 / 1024 / 1024
-			if math.IsNaN(ramGB) {
-				log.Warnf("ramGB is NaN. Setting to 0.")
-				ramGB = 0
-			}
-
-			ramMultiple := cpu*cpuToRAMRatio + ramGB
-			if math.IsNaN(ramMultiple) {
-				log.Warnf("ramMultiple is NaN. Setting to 0.")
-				ramMultiple = 0
-			}
-
-			var nodePrice float64
-			if newCnode.Cost != "" {
-				nodePrice, err = strconv.ParseFloat(newCnode.Cost, 64)
-				if err != nil {
-					log.Warnf("Could not parse total node price")
-					return nil, err
-				}
-				if newCnode.GPUCost != "" {
-					gpuPrice, err := strconv.ParseFloat(newCnode.GPUCost, 64)
-					if err != nil {
-						log.Warnf("Could not parse node gpu price")
-						return nil, err
+				if defaultRAM != 0 {
+					newCnode.VCPUCost = fmt.Sprintf("%f", cpuPrice)
+					newCnode.RAMCost = fmt.Sprintf("%f", ramPrice)
+				} else { // just assign the full price to CPU
+					if cpu != 0 {
+						newCnode.VCPUCost = fmt.Sprintf("%f", nodePrice/cpu)
+					} else {
+						newCnode.VCPUCost = fmt.Sprintf("%f", nodePrice)
 					}
-					nodePrice = nodePrice - gpuPrice // remove the gpuPrice from the total, we're just costing out RAM and CPU.
 				}
-			} else if newCnode.VCPUCost != "" {
-				nodePrice, err = strconv.ParseFloat(newCnode.VCPUCost, 64) // all the price was allocated to the CPU
-				if err != nil {
-					log.Warnf("Could not parse node vcpu price")
-					return nil, err
-				}
-			} else { // add case to use default pricing model when API data fails.
-				log.Debugf("No node price or CPUprice found, falling back to default")
-				nodePrice = defaultCPU*cpu + defaultRAM*ramGB
-			}
-			if math.IsNaN(nodePrice) {
-				log.Warnf("nodePrice parsed as NaN. Setting to 0.")
-				nodePrice = 0
-			}
+				newCnode.RAMBytes = fmt.Sprintf("%f", ram)
 
-			ramPrice := (nodePrice / ramMultiple)
-			if math.IsNaN(ramPrice) {
-				log.Warnf("ramPrice[nodePrice: %f / ramMultiple: %f] parsed as NaN. Setting to 0.", nodePrice, ramMultiple)
-				ramPrice = 0
+				log.Tracef("Computed \"%s\" RAM Cost := %v", name, newCnode.RAMCost)
 			}
-
-			cpuPrice := ramPrice * cpuToRAMRatio
-
-			if defaultRAM != 0 {
-				newCnode.VCPUCost = fmt.Sprintf("%f", cpuPrice)
-				newCnode.RAMCost = fmt.Sprintf("%f", ramPrice)
-			} else { // just assign the full price to CPU
-				if cpu != 0 {
-					newCnode.VCPUCost = fmt.Sprintf("%f", nodePrice/cpu)
-				} else {
-					newCnode.VCPUCost = fmt.Sprintf("%f", nodePrice)
-				}
-			}
-			newCnode.RAMBytes = fmt.Sprintf("%f", ram)
-
-			log.Tracef("Computed \"%s\" RAM Cost := %v", name, newCnode.RAMCost)
 		}
 
 		nodes[name] = &newCnode
