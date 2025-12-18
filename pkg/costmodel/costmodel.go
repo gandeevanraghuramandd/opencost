@@ -1215,13 +1215,13 @@ func (cm *CostModel) GetNodeCost() (map[string]*costAnalyzerCloud.Node, error) {
 						log.Warnf("Could not parse total node price")
 						return nil, err
 					}
-					if newCnode.GPUCost != "" {
-						gpuPrice, err := strconv.ParseFloat(newCnode.GPUCost, 64)
-						if err != nil {
-							log.Warnf("Could not parse node gpu price")
-							return nil, err
-						}
-						nodePrice = nodePrice - gpuPrice // remove the gpuPrice from the total, we're just costing out RAM and CPU.
+				if newCnode.GPUCost != "" {
+					gpuPrice, err := strconv.ParseFloat(newCnode.GPUCost, 64)
+					if err != nil {
+						log.Warnf("Could not parse node gpu price")
+						return nil, err
+					}
+					nodePrice = nodePrice - gpuPrice*gpuc // remove the total GPU cost from the node price, we're just costing out RAM and CPU.
 					}
 				} else if newCnode.VCPUCost != "" {
 					nodePrice, err = strconv.ParseFloat(newCnode.VCPUCost, 64) // all the price was allocated to the CPU

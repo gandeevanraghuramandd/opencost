@@ -96,3 +96,6 @@ build IMAGE_TAG RELEASE_VERSION: (build-binary RELEASE_VERSION)
 validate-protobuf:
     ./generate.sh
     git diff --exit-code
+
+
+just build us-docker.pkg.dev/dd-labs-poc/cityhopper/cuda-development:opencost-1.118.0-gpucost-bugfix opencost-1.118.0-gpucost-bugfix
